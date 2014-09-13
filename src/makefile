@@ -1,0 +1,13 @@
+MAINSRC := main.c ghost.c func_redirect.c httpmethod.c http_parser.c
+MAINHEADERS := global.h main.h ghost.h
+MAINFLAGS:= -lxml2 -dl -g
+
+all: $(SRC) $(HEADERS)
+	cc -o lida-main $(MAINSRC) $(MAINFLAGS)
+	
+.PHONY: clean debug
+
+clean : 
+	rm *.o
+debug : 
+	mv lida-main ..

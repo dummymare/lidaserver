@@ -1,0 +1,48 @@
+# include "read_config.h"
+
+int read_config (char *path)
+{
+   xmlDocPtr  configfile;
+   xmlNodePtr cur;
+   
+   configfile = xmlReadFile (path, "UTF-8", XML_PARSE_RECOVER);
+   if (configfile == NULL)
+   {
+      perror ("configfailed");
+      return ERROR;
+   }
+   
+   cur = xmlDocGetRootElement (configfile);
+   if (cur == NULL)
+   {
+      perror ("Rootpoint missing");
+      xmlFreeDoc (configfile);
+      return ERROR;
+   }
+   
+   else if (xmlStrcmp (cur->name, "default") != 0)
+   {
+      perror ("Invaild config format");
+      xmlFreeDoc (configfile);
+      return ERROR;
+   }
+   
+   xmlXPathContextPtr context = xmlXPathNewContext(configfile);
+   xmlXPathObjectPtr result = xmlXPathEvalExpression((const xmlChar*)"//frontpage", context);
+   main_init.frontpage = xmlNodeGetContent (result->nodesetval->nodeTab[0]);
+   
+   result =  xmlXPathEvalExpression((const xmlChar*)"//homepath", context);
+   main_init.homepath = xmlNodeGetContent (result->nodesetval->nodeTab[0]);
+   
+   result =  xmlXPathEvalExpression((const xmlChar*)"//hostname", context);
+   main_init.hostname = xmlNodeGetContent (result->nodesetval->nodeTab[0]);
+   
+   result =  xmlXPathEvalExpression((const xmlChar*)"//port", context);
+   main_init.port = atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   
+   xmlXPathFreeObject(result);
+   xmlFreeDoc(configfile);
+   xmlCleanupParser();  
+   
+   return TRUE;
+}

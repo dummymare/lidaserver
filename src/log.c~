@@ -1,0 +1,41 @@
+# include "global.h"
+# include "http_parser.h"
+# include "log.h"
+
+void lidalog (int type, char *info)
+{
+   FILE *logfile, *pipe;
+   char runtime[30];
+   
+   /*Get current time*/
+   if ((pipe = popen ("date", "r")) == NULL)
+            return;
+	    
+   fgets (runtime, 30, pipe);
+   lida_breakline (runtime);
+   fclose (pipe);
+   
+
+   switch (type)
+   {
+      case LIDA_ERR:{
+      
+         if ((logfile = fopen ("/var/log/lida/error.log", "a")) == NULL)
+            return;
+         fprintf (logfile, "%d: [%s]   %s :%s\n", (int)getpid (), runtime, info, strerror (errno));
+         fclose (logfile);
+         
+         break;
+      }
+      
+      case LIDA_ACCESS:{
+         
+         if ((logfile = fopen ("/var/log/lida/access.log", "a")) == NULL)
+            return;
+         fprintf (logfile, "<%s---%s>:%d [%s]   %s\n", info[0], info[1], (int)getpid (), runtime, info[2]);
+         fclose (logfile);
+         
+         break;
+      }
+   }
+}

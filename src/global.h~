@@ -1,0 +1,66 @@
+# include <stdio.h>
+# include <stdlib.h>
+# include <unistd.h>
+# include <error.h>
+# include <string.h>
+# include <strings.h>
+# include <setjmp.h>
+# include <errno.h>
+
+# include <sys/types.h>
+# include <sys/signal.h>
+# include <sys/time.h>
+# include <sys/resource.h>
+# include <sys/wait.h>
+# include <sys/errno.h>
+# include <sys/stat.h>
+# include <fcntl.h>
+# include <dlfcn.h>
+
+# include <sys/socket.h>
+# include <netinet/in.h>
+# include <arpa/inet.h>
+
+struct config_info
+{
+   char *hostname;
+   char *path;
+   char *frontpage;
+};
+
+struct config_info *httphost;
+
+struct server_basic
+{
+   int port;
+   int listener;
+   int connect;
+   int keep_alive;
+   int cache;
+};
+
+struct http_headline
+{
+   char method[7];
+   char url[40];
+   char protocal[15];
+};
+
+struct http_headline request_headline;
+
+struct http_attrihash 
+{
+   char *content;
+   char *attri;
+   struct http_attrihash *next;
+};
+
+struct http_attrihash *lida_hashlist[29];
+
+# define ATTRI_LIST 29
+int hostnum;
+
+void lida_breakline (char *);
+int lida_hashkey (char *);
+char *hash_conflictsearch (int, char *);
+

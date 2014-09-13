@@ -1,0 +1,12 @@
+# define LIDA_BUFSIZ   4096
+
+void          backend            (void);
+int           passiveTCP         (void);
+void          lida_fork          (void);
+int           lida_timer_init    (void);
+void          lida_timer_add     (int);
+struct flock *lida_lock_init     (void);
+void          check_client       (int);
+void          read_exit          (int);
+
+static int *listener_lst;           

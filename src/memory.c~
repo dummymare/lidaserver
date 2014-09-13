@@ -1,0 +1,203 @@
+# include "lidacore.h"
+# include "memory.h"
+
+
+int mem_cache_creat (size_t size, struct mem_cache_head **p)
+{
+   int n, r, i;
+   struct mem_cache *q, t;
+
+   if ((*p = malloc (PAGE_SIZ)) == NULL)
+      return ERROR;
+   n = (PAGE_SIZ - sizeof (struct mem_cache_head)) / size;
+   
+   /*Init head of cache block*/
+   (*p)->size = size;
+   (*p)->num = n;
+   (*p)->next = (void *)(*p) + sizeof (struct mem_cache_head);
+   (*p)->block_next = NULL;
+   q = (*p)->next;
+
+   t.next = (void *)q + size;
+   t.prev = (struct mem_cache *)(*p);
+   memcpy (q, &t, sizeof (struct mem_cache));
+   q = q->next;
+
+   for (i=1; i<n; i++)
+   {
+      t.next = (void *)q + size;
+      t.prev = (void *)q - size;
+      memecpy (q, &t, sizeof (struct mem_cache));
+      q = q->next;
+   }
+
+   return n;
+}
+
+
+void *mem_cache_alloc (struct mem_cache_head *p)
+{
+   if (p == NULL)
+      return NULL;
+      
+   struct mem_cache_head *m;
+   struct mem_cache *a;
+   
+   /*If we do not have enough space, we need to alloc more*/
+   if (!(p->num))
+   {
+      if (mem_cache_creat (p->size, &m) < 0)
+         return NULL;
+         
+      p->block_next = m;
+      p = m;
+   }
+
+   /*Update memory chain*/
+   a = p->next;
+   p->next = a->next;
+   a->next->prev = (struct mem_cache *)p;
+   p->num --;
+
+   return ((void *)a);
+}
+
+
+void mem_cache_free (void *g, struct mem_cache_head *p)
+{
+   struct mem_cache t;
+
+   /*Add freed space to void chain*/
+   t.next = p->next;
+   t.prev = (struct mem_cache *)p;
+   memcpy (g, (void *)&t, sizeof (t));
+   p->next = (struct mem_cache *)g;
+   p->num++;
+}
+
+
+struct mem_pool_head *mem_pool_creat (int fd)
+{
+   struct mem_pool_head t, **h = pool_lst;
+   POOL_OFFSET (h, fd);
+   
+   if ((*h = malloc (PAGE_SIZ)) == NULL)
+      return NULL;
+
+   /*Init head info for this pool block*/
+   t.start = (void *)*h + sizeof (struct mem_pool_head);
+   t.end = (void *)*h + PAGE_SIZ;
+   t.next = NULL;
+   t.extra = NULL;
+   t.tail = NULL;
+   memcpy ((void *)*h, (void *)&t, sizeof (struct mem_pool_head));
+
+   return *h;
+}
+
+
+void *mem_pool_alloc (size_t size, int fd)
+{
+   void *ret;
+   struct mem_pool_head *new, **p = pool_lst;
+   POOL_OFFSET (p, fd);
+   
+   /*Alloc large space*/
+   if (size > POOL_SIZ)
+   {
+      ret = malloc (size);
+      mem_pool_add (ret, size, fd);
+      return ret;
+   }
+
+   /*Browse to find avalible block*/
+   for (; *p != NULL; *p = (*p)->next)
+   {
+      if (((*p)->end - (*p)->start) >= size)
+         break;
+   }
+
+   /*Not enough space, we need to alloc more*/
+   if (*p == NULL)
+   {
+      new = mem_pool_creat ();
+      (*p)->next = new;
+      *p = (*p)->next;
+   }
+
+   /*Return the address*/
+   ret = (*p)->start;
+   (*p)->start += size;
+   return ret;
+}
+
+
+void mem_cache_destroy (struct mem_cache_head *p)
+{
+   if (p->block_next != NULL)
+      mem_cache_destroy (p->block_next);
+
+   free (p);
+}
+
+
+void mem_pool_destroy (int fd)
+{
+   struct mem_pool_head **p = pool_lst;
+   struct mem_pool_large *s;
+   POOL_OFFSET (p, fd);
+   
+   /*Free large spaces first*/
+   for (s=(*p)->extra; s!=NULL; s=s->next)
+      free (s->start);
+
+   if ((*p)->next != NULL)
+      mem_pool_destroy ((*p)->next);
+
+   free (*p);
+}
+
+
+struct mem_buffer *mem_buffer_creat (int cnt, int fd)
+{
+   struct mem_buffer *p, *h, *t;
+   size_t size = sizeof (struct mem_buffer);
+
+   h = (struct mem_buffer *)mem_pool_alloc (size, fd);
+   t = h;
+   cnt--;
+
+   while (cnt--)
+   {
+      p = (struct mem_buffer *)mem_pool_alloc (size, fd);
+      p->prev = h;
+      h->next = p;
+      h = h->next;
+   }
+
+   return t;
+}
+
+
+void mem_pool_add (void *p, size_t size, int fd)
+{
+   struct mem_pool_head **s = pool_lst;
+   struct mem_pool_large *new;
+   POOL_OFFSET (s, fd);
+   
+   
+   if ((*s)->extra == NULL){
+      (*s)->extra = (struct mem_pool_large *)mem_pool_alloc (sizeof (struct mem_pool_large), fd);
+      new = (*s)->extra;
+      (*s)->tail = (*s)->extra;
+   }
+   
+   else {
+      new = (struct mem_pool_large *)mem_pool_alloc (sizeof (struct mem_pool_large), fd);
+      (*s)->tail->next = new;
+      (*s)->tail = (*s)->tail->next;
+   }
+   
+   new->start = p;
+   new->end = p + size;
+}

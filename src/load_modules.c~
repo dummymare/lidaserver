@@ -1,0 +1,48 @@
+# include "load_modules.h"
+
+void *dltest;
+
+void load_modules (char *path)
+{
+   xmlNodePtr cur;
+   char *type;
+   char *modname;
+   
+   if (chdir (path) < 0)
+   {
+      perror ("Chdir failed");
+      longjmp (recheck, 1);
+   }
+
+   xmlDocPtr modconf = xmlcheck ("./config/modules.xml", "modules");
+   
+   cur = xmlDocGetRootElement (modconf);
+   
+   for (cur = cur->xmlChildrenNode; cur; cur = cur->next)
+   {
+      
+   }
+}
+
+
+
+void onload (char *modname)
+{
+   dltest = dlopen (modname, RTLD_LAZY);
+   
+   char *dlmsg = dlerror ();
+   if (dlmsg != NULL)
+      printf ("mod %s load error:%s", modname, dlmsg);
+}
+
+
+
+void dlfunc_check (char *func_name, char *modname)
+{
+   char *dlmsg  = dlerror ();
+   
+   if (dlmsg != NULL)
+      printf ("function %s error: %s\nunload mod %s\n", func_name, dlmsg, modname);
+      
+   dlclose (dltest);
+}

@@ -1,0 +1,408 @@
+# include <time.h>
+# include "global.h"
+# include "listener.h"
+# include "ghost.h"
+# include "log.h"
+# include "thread.h"
+
+struct thread_pool_h thread_pool;
+struct timer_h *listener_timer;
+
+
+int listen_event (int sock, struct timer_head *timer)
+{
+   int client;
+   struct sockaddr_in client_info;
+   socklen_t alen = sizeof (struct sockaddr_in);
+   
+   client = accept (sock, (struct sockaddr *)&client_info, &alen);
+            
+   if (client < 0)
+   {
+      if (errno == EINTR)
+         continue;
+      else ERR_RET ("accept");
+   }
+            
+   /*Set new socket fd to non-block mode*/
+   if (SET_NON_BLOCK (client) < 0)
+      return -1;
+               
+   /*Add new socket fd to keep-alive timeout queue*/
+   if (true_type.keep_alive > 0){
+      if (lida_timer_add () < 0){
+         lidalog (LIDA_ACCESS, "timer queue is full");
+         goto END_ACCEPT;
+      }
+   }
+            
+   /*Add new socket fd to epoll list*/
+   struct epoll_event tmp;
+   tmp.events = EPOLLIN | EPOLLPRI | EPOLLET;
+   tmp.data.u64 = (uint64_t)client;
+   tmp.data.u64 = tmp.data.u64<<32;
+
+   if (epoll_ctl (epfd, EPOLL_CTL_ADD, &tmp) < 0)
+   {
+      lidalog (LIDA_ERR, "epoll_ctl");
+      lida_timer_stack_del (timer);
+   }
+            
+   /*If all green, init the memory pool for this connect*/
+   else {
+      mem_pool_creat (client);
+      buf_log_init (&client_info, client);
+   }
+      
+END_ACCEPT:
+   event_flag = 0;
+   
+   /*Release the socket lock, others are waiting*/
+   l = lida_lock_init (F_UNLCK);
+   
+   if (fcntl (sock, F_SETLK, l) < 0)
+      ERR_RET ("fcntl");
+   
+   if (epoll_ctl (epfd, EPOLL_CTL_DEL, sock, NULL) < 0)
+      ERR_RET ("epoll_ctl");
+}
+
+
+void read_event (void *t)
+{
+   int fd = *(int *)t;
+   char head[PAGE_SIZ*2];
+   void *buf = (void *)head;
+   size_t buf_siz = 0, rest = PAGE_SIZ*2;
+   struct http_request_t *p;
+   struct config_info *q;
+   char *path;
+   FILE *d;
+   
+   /*Get the request head*/
+   while ((buf_siz = read (fd, buf, rest)) > 0)
+   {
+      buf+=buf_siz;
+      rest-=buf_siz;
+      
+      if (!rest)
+         break;
+   }
+   
+   /*Send invaild request to backend servers*/
+   if ((p = http_parser (head, fd)) == NULL){
+      error_post (fd);
+      goto END_PTH;
+   }
+   
+   if ((buf_siz = get_content_len (p->list, p->offset)) != 0)
+      d = write_to_buffer (buf_siz, fd);
+      
+   if ((q = host_search (p->list)) == NULL){
+      error_post (fd);
+      goto END_PTH;
+   }
+
+   if ((path = file_search (p->method, q, p->url)) == NULL)
+      post_to_proxy (p->url, q, fd, head, d);                    
+
+   else post_file (p->method, path, fd);
+
+END_PTH:
+   pthread_exit (NULL);
+}
+
+
+struct config_info *host_search (struct http_attrihash l[])
+{
+   char *p = (char *)hash_search ("host", l, crc32_port), *t;
+   struct config_info *q = httphost;
+   int i;
+
+   if (p = NULL)
+     return NULL;
+
+   for (i=0; i<hostnum; i++)
+   {
+      if (strcmp (p, (q+i)->hostname) == 0){
+         q+=i;
+	 goto R_RET;
+      }
+   }
+
+   return NULL;
+   
+R_RET:
+   return q;
+}
+
+
+char *file_search (char *method, struct config_info *q, char *url)
+{
+   /*We only handle get and head method here*/
+   if (strcmp (method, "GET") && strcmp (method, "HEAD"))
+      return NULL;
+      
+   int fd;
+   struct stat info;
+   char *file = strtok_r (url, "?", &t);
+
+   if (t != NULL)
+     return NULL;
+
+   if (strcmp (path, "/") == 0)
+      file = q->frontpage;
+
+   char path[strlen (q->hostname) + strlen (file)];
+   sprintf (path, "%s%s", q->hostname, file);
+
+   if (stat (path, &info) < 0)
+      return NULL;
+
+   if (info.st_size > true_type.cache)
+      return path;
+
+   key_t fkey = ftok (path, 0);
+   request_cache_proxy (fkey);
+
+   return ("handled");
+}
+
+
+size_t get_content_len (struct http_attrihash t[], size_t offset)
+{
+   size_t s;
+   char *r = (char *)hash_search ("Content-Length", t, lida_hashkey);
+
+   if (r == NULL)
+      return 0;
+
+   s = atol (r) - offset;
+   return s;
+}
+
+
+FILE *write_to_buffer (size_t size, int fd)
+{
+   char fname[15];
+   FILE *fp;
+   char buf[PAGE_SIZ];
+   size_t buf_siz, sum = 0;
+   int re_cnt = 10;
+
+   sprintf (fname, "/var/lida/tmp/Buffer_%d.tmp", fd);
+   fp = fopen (fname, "w");
+
+   while (re_cnt--){
+      while ((buf_siz = read (fd, (void *)buf, PAGE_SIZ)) > 0)
+      {
+         sum+=buf_siz;
+         fwrite (buf, buf_siz, 1, fp);
+      }
+
+      if (sum >= size)
+         goto WR_END;
+   }
+   
+      err_post (fd);
+      return NULL;
+
+WR_END:
+   fflush (fp);
+   return fp;
+}
+
+
+void err_post (int fd)
+{
+   size_t r, t;
+   char *str;
+   
+   for (r=(size_t)strlen(err_page), str=err_page; r; str+=t, r-=t){
+      t = write (fd, str, r);
+      
+      if (t < 0){
+         err_log (LIDA_ACCESS, "Failed to send error page", fd);
+         return;
+      }
+   }
+}
+
+
+void listener_clean (uint64_t d)
+{
+   int fd = d;
+   
+}
+
+
+void timer_active (int signo)
+{
+   lida_timer_del (event, listener_clean);
+   return;
+}
+
+
+void listener_signal ()
+{
+   int err;
+   
+   /*Signal mask set up*/
+   sigset_t sigset;
+   
+   sigemptyset (&sigset);
+   sigaddset (&sigset, SIGALRM);
+   
+   if (err = pthread_sigmask (SIG_BLOCK, &sigset, NULL)){
+      lidalog (LIDA_ACCESS, strerror (err));
+      exit (1);
+   }
+   
+   /*Install main thread's signal handler*/
+   struct sigaction act[2];
+   
+   act[0].sa_handler = listener_kill;
+   sigfillset (&act[0].sa_mask);
+   
+   if (sigaction (SIGINT, &act[0], NULL) < 0){
+      lidalog (LIDA_ERR, "sigaction");
+      exit (1);
+   }
+   
+   act[1].sa_handler = log_update;
+   sigemptyset (&act[1].sa_mask);
+   
+   if (sigaction (SIGUSR1, &act[1], NULL) < 0){
+      lidalog (LIDA_ERR, "sigaction");
+      exit (1);
+   }
+}
+
+
+void lida_listener_proc (int sock, int main, int cache)
+{
+   unsigned event_flag = 0, thread_flag = 1;
+   int epoll_cnt, i;
+   struct sockaddr_in in;
+   
+   /*Init listener memory cache*/
+   mem_cache_creat (sizeof (timer_t));
+   
+   /*
+   Init thread pool
+   If it failed here,
+   then we have to run in single thread mode
+   */
+   if (thread_pool_init (true_type.max_thread, &thread_pool) < 0)
+      thread_flag = 0;
+
+   /*Init memory and log pools*/
+   pool_lst = calloc (true_type.connect, sizeof (void *));
+   log_lst = calloc (true_type.connect, sizeof (void *));
+   
+   /*Register signal handler*/
+   listener_signal ();
+   
+   /*Init timer*/
+   event.max = true_type.connect;
+   event.head = NULL;
+   event.tail = NULL;
+   
+   /*Init pthread mutex*/
+   if (pthread_mutex_init(&pth_lock, NULL) != 0)
+      ERR_EXIT ("pthread_mutex_init");
+   
+   /*Set up host socket epoll event*/
+   struct epoll_event m, *t;
+   m.events = EPOLLIN | EPOLLPRI | EPOLLET;
+   m.data.u64 = (uint64_t)sock;
+   m.data.u64 = m.data.u64<<32;
+   
+   epfd = epoll_create (true_type.connect);
+   if (epfd < 0)
+      ERR_EXIT ("epoll");
+      
+   /*Init proxy sockets*/
+   proxy_cnt = proxy_init ();
+   
+   while (1)
+   {
+      /*If listen queue is full, This process shouldn't get lock*/
+      if (timer_is_full (&event))
+      {
+         struct flock *l = lida_lock_init (F_RDLCK);
+         
+	 /*This process have access to accept*/
+         if (fcntl (sock, F_SETLK, l) >= 0)
+         {
+            if (epoll_ctl (epfd, EPOLL_CTL_ADD, sock, &m) < 0)
+               ERR_EXIT ("epoll_ctl");
+
+            event_flag = 1;
+         } 
+
+         else event_flag = 0;
+      }
+      
+      /*Start listening*/
+      if ((epoll_cnt = epoll_wait (epfd, t, true_type.connect, 0)) < 0)
+         ERR_EXIT ("epoll_wait");
+
+      /*No socket ready to read*/
+      if (!epoll_cnt)
+         continue;
+      
+      /*Handle epoll events*/
+      for (i=0; i<epoll_cnt; i++)
+      {  
+	 /*proxy read event*/
+	 if (IF_PROXY ((t+i)->data.u64))
+	 {
+	    pthread_t thid;
+	    int fd[2];
+	    fd[1] = (t+i)->data.u64 & 0x0000FFFF;
+	    fd[0] = (t+i)->data.u64 >> 32;
+	    
+	    if (!pthread_create (&thid, NULL, proxy_event, (void *)&fd[0]))
+	       continue;
+	    
+	    /*Handle it in current thread*/
+	    else proxy_event ((void *)&fd[0]);
+	 } 
+	 
+	 else {
+	    int rfd = (t+i)->data.u64>>32;
+	    
+	    /*Listener event*/
+	    if (event_flag && rfd == sock)
+	    {
+	       if (listen_event (sock, &event, &in) < 0)
+	          lidalog (LIDA_ACCESS, "connection failed");
+	    }
+	    /*Common read event*/
+	    else {
+	       pthread_t thid;
+	       
+	       if (!pthread_create (&thid, NULL, read_event, (void *)&rfd))
+	          continue;
+	          
+	       else read_event ((void *)&rfd);
+	    }
+	 }
+      }
+   }
+}
+
+
+/*Set up lock options*/
+struct flock *lida_lock_init (int type)
+{
+   struct flock lock;
+   
+   lock.l_type = type;
+   lock.l_start = 0;
+   lock.l_whence = SEEK_SET;
+   lock.l_len = 0;
+   
+   return (&lock);
+}

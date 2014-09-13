@@ -1,0 +1,358 @@
+# include "main.h"
+# include "global.h"
+# include "log.h"
+# include "ghost.h"
+
+
+int main (int argc, char *argv[])
+{
+  
+  if (setjmp (env) != 0)
+     exit (1);
+     
+  lida_readdefault ();
+  lida_readhosts ();
+  
+  port_to_ghost ();
+}
+
+
+
+void port_to_ghost ()
+{
+   pid_t pid;
+   
+   if ((pid = fork ()) < 0)
+   {
+      perror ("fork");
+      exit (1);
+   }
+   
+   else if (pid == 0)
+      backend ();
+   
+   else {
+      puts ("ghost to start");
+      exit (0);
+   }
+}
+
+
+
+xmlDocPtr lida_docheck (char *path, char *headstr)
+{
+   xmlDocPtr  doc;
+   xmlNodePtr cur;
+   
+   doc = xmlReadFile (path, "UTF-8", XML_PARSE_RECOVER);
+   if (doc == NULL)
+   {
+      printf ("xml read failed");
+      longjmp (env, 1);
+   }
+   
+   cur = xmlDocGetRootElement (doc);
+   if (cur == NULL)
+   {
+      printf ("Rootpoint missing");
+      xmlFreeDoc (doc);
+      longjmp (env, 1);
+   }
+   
+   else if (xmlStrcmp (cur->name, headstr) != 0)
+   {
+      printf ("Invaild config format:%s\n", headstr);
+      xmlFreeDoc (doc);
+      longjmp (env, 1);
+   }
+   
+   return doc;
+}
+
+
+size_t xml_get_max (xmlXPathObjectPtr r)
+{
+   size_t ret = 0;
+   char *str = (char *)xmlGetProp (r->nodesetval->nodeTab[0], "max");
+   char *h = str, x[10];
+   
+   while (*str)
+      str++;
+      
+   switch (*(--str))
+   {
+      case ('K'): ret = (size_t)1024*atoi (strncpy (x, h, str - h)); break;
+      case ('M'): ret = (size_t)1024*1024*atoi (strncpy (x, h, str - h)); break;
+      case ('G'): ret = (size_t)1024*1024*1024*atoi (strncpy (x, h, str - h)); break;
+      default : (size_t)atoi (strncpy (x, h, str - h));
+   }
+   
+   return ret;
+}
+
+
+void lida_readdefault ()
+{
+   xmlXPathContextPtr context;
+   xmlXPathObjectPtr  result;
+   char *type;
+   
+   xmlDocPtr configfile = lida_docheck ("./default.xml", "default");
+   context = xmlXPathNewContext (configfile);
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//port", context);
+   true_type.port = atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//listener", context);
+   true_type.listener = atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//connect", context);
+   true_type.connect = atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//keep-alive", context);
+   type = (char *)xmlGetProp (result->nodesetval->nodeTab[0], "type");
+   if (!strcmp (type, "min"))
+      true_type.keep_alive = (time_t)60*atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   else true_type.keep_alive = (time_t)atoi (xmlNodeGetContent (result->nodesetval->nodeTab[0]));
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//cache-options", context);
+   type = (char *)xmlGetProp (result->nodesetval->nodeTab[0], "status");
+   if (strcmp (status, "on")){
+      true_type.cache = NULL;
+      goto END_DEFAULT;
+   }
+   else true_type.cache = malloc (sizeof (struct cache_options));
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//mem-cache", context);
+   true_type.cache->mem_max = xml_get_max (result);
+   
+   result = xmlXPathEvalExpression ((const xmlChar *)"//disk-cache", context);
+   type = (char *)xmlGetProp (result->nodesetval->nodeTab[0], "status");
+   
+   if (strcmp (type, "on"))
+      true_type.cache->disk_flag = 0;
+   else {
+      true_type.cache->disk_max = xml_get_max (result);
+      true_type.cache->disk_flag = 1;
+      true_type.cache->match = (char *)xmlGetProp (result->nodesetval->nodeTab[0], "match");
+   }
+   
+END_DEFAULT:
+   xmlXPathFreeObject(result);
+   xmlFreeDoc(configfile);
+   xmlCleanupParser();  
+}
+
+
+struct proxy_group *search_proxy_group (char *id)
+{
+   struct proxy_group *i;
+   
+   for (i=proxy_lst; i!=NULL; i++)
+   {
+      if (strcmp (i->id, id) == 0)
+         goto S_RET;
+   }
+   return NULL;
+   
+S_RET:
+   return (i);
+}
+
+
+struct proxy_pass *xml_get_active (xmlNodePtr cur)
+{
+   xmlNodePtr act = cur->xmlChildrenNode;
+   int cnt = 0;
+   struct proxy_pass *ret;
+   char *tid, *x;
+   
+   for (; act != NULL; act = act->next)
+   {
+      ret = realloc (ret, (++cnt)*(sizeof (struct proxy_pass)));
+      (ret + cnt - 1)->match = xmlGetProp (act, "match");
+      
+      x = (char *)xmlGetProp (act, "cache");
+      if (strcmp (x, "on"))
+         (ret + cnt - 1)->cache_flag = 0;
+      else (ret + cnt - 1)->cache_flag = 1;
+      
+      tid = xmlNodeGetContent (act);
+      (ret + cnt + 1)->proxy = search_proxy_group (tid);
+   }
+   
+   return ret;
+}
+
+
+void lida_readhosts ()
+{
+   int i;
+   xmlXPathContextPtr context;
+   xmlXPathObjectPtr  result;
+
+   xmlDocPtr configfile = lida_docheck ("./vhost.xml", "vhost");
+   
+   context = xmlXPathNewContext(configfile);
+   
+   result = xmlXPathEvalExpression((const xmlChar*)"//hostname", context);
+   httphost = (struct config_info *)calloc (result->nodesetval->nodeNr, sizeof (struct config_info));
+   hostnum = result->nodesetval->nodeNr;
+   printf ("%d\n", hostnum);
+   struct config_info *hostcur = httphost;
+   
+   for (i = 0; i < result->nodesetval->nodeNr; i++, hostcur++)
+      hostcur->hostname = xmlNodeGetContent (result->nodesetval->nodeTab[i]);
+      
+   result = xmlXPathEvalExpression((const xmlChar*)"//path", context);
+   hostcur = httphost;
+   
+   for (i = 0; i < result->nodesetval->nodeNr; i++, hostcur++)
+      hostcur->path = xmlNodeGetContent (result->nodesetval->nodeTab[i]); 
+      
+   result = xmlXPathEvalExpression((const xmlChar*)"//frontpage", context);
+   hostcur = httphost;
+   
+   for (i = 0; i < result->nodesetval->nodeNr; i++, hostcur++)
+      hostcur->frontpage = xmlNodeGetContent (result->nodesetval->nodeTab[i]); 
+      
+   result = xmlXPathEvalExpression((const xmlChar*)"//proxy-pass", context);
+   hostcur = httphost;
+   
+   for (i = 0; i < result->nodesetval->nodeNr; i++, hostcur++)
+      hostcur->active = xml_get_active (result->nodesetval->nodeTab[i]); 
+      
+         
+   xmlXPathFreeObject(result);
+   xmlFreeDoc(configfile);
+   xmlCleanupParser();  
+   
+   //printf ("%s %s %s\n", httphost->hostname, httphost->path, httphost->frontpage);
+}
+
+
+void load_modules ()
+{
+   char *cur_name, *cur_init;
+   void *handle;
+   void (*init_func) (xmlNodePtr) = NULL;
+
+   xmlDocPtr modfile = lida_docheck ("./modules/modules.xml", "modules-root");
+   xmlNodePtr cur = xmlDocGetRootElement(modfile);
+   
+   if (chdir ("./modules") < 0){
+      perror ("chdir");
+      longjmp (env, 1);
+   }
+   
+   
+   for (cur = cur->xmlChildrenNode; cur != NULL; cur = cur->next)
+   {
+      (xmlChar *)cur_name = xmlGetProp (cur, "name");
+      (xmlChar *)cur_init = xmlGetProp (cur, "init");
+      
+      handle = dlopen (cur_name, RTLD_NOW);
+      if (!handle) {
+          fprintf(stderr, "%s\n", dlerror());
+          longjmp (env, 1);
+      }
+      
+      dlerror ();
+      
+      if ((init_func = dlsym (handle, cur_init)) != NULL)
+         (*init_func) (cur);
+      else printf ("Waring Invaild module: %s failed to load\n");
+   }
+   
+   if (chdir ("..") < 0){
+      perror ("chdir");
+      longjmp (env, 1);
+   }
+}
+
+
+void lida_breakline (char *str)
+{
+   char *p = str;
+   
+   while (*p)
+      {
+         if ((*p == '\r') || (*p == '\n'))
+            *p = '\0';
+         p++;
+      }
+}
+
+
+int module_register (char **match_lst, void (*handler) (char *, char *))
+{
+   struct module_function *p, *q;
+   
+   if (module_head == NULL) 
+      module_head = (struct module_function *)malloc (sizeof (struct module_function));
+      
+   p = module_head;
+   while (p->next != NULL)
+      p = p->next;
+      
+   q = (struct module_function *)malloc (sizeof (struct module_function));
+   p->next = q;
+   q->match_lst = match_lst;
+   q->callback = handler;
+   
+   return TRUE;
+}
+
+
+void load_proxy ()
+{ 
+   int cnt = 0;
+   xmlDocPtr doc = lida_docheck ("proxy.xml", "root");
+   xmlNodePtr cur = xmlDocGetRootElement(doc);
+   
+   for (cur = cur->xmlChildrenNode; cur != NULL; cur = cur->next)
+   {
+      proxy_lst = realloc (proxy_lst, (++cnt)*sizeof(struct proxy_group));
+      (proxy_lst + cnt - 1)->id = xmlGetProp (cur, "id");
+      load_proxy_nodes (proxy_lst + cnt - 1, cur);
+   }
+   
+   xmlFreeDoc (doc);
+   xmlCleanupParser();
+}
+
+
+void load_proxy_nodes (struct proxy_group *p, xmlNodePtr cur)
+{
+   char *addr, *l;
+   xmlNodePtr node = cur->xmlChildNode;
+   
+   if (node == NULL)
+      return;
+      
+   p->node = malloc (sizeof (struct proxy_node));
+   p->node->prev = malloc (sizeof (struct proxy_node));
+   p->node->prev->next = p;
+   p->weight = atoi (xmlGetProp (node, "weight"));
+   addr = xmlNodeGetContent (node);
+   p->node->ip = strtok (addr, ":", &l);
+   
+   if (l == NULL)
+      p->node->port = 80;
+   else p->node->port = atoi (l);
+   
+   struct proxy_node *n = p->node;
+   
+   for (node = node->next; node != NULL; node = node->next, n = n->next)
+   {     
+      n->next = malloc (sizeof (struct proxy_node));
+      n->next->prev = n;
+      n->next->weight = xmlGetProp (node, "weight");
+      addr = xmlNodeGetContent (node);
+      n->next->ip = strtok (addr, ":", &l);
+      
+      if (l == NULL)
+         n->next->port = 80;
+      else p->node->port = atoi (l);
+   }
+}

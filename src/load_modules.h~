@@ -1,0 +1,22 @@
+# include "main.h"
+
+# include <string.h>
+# include <strings.h>
+# include <dlfcn.h>
+
+void onload (char *);
+
+struct httpd 
+{
+   int  (*get)      (void);
+   int  (*post)     (void);
+   int  (*head)     (void);
+   int  (*put)      (void);
+   int  (*trace)    (void);
+   int  (*options)  (void);
+   int  (*delete)   (void);
+   void (*extend)   (void);
+}*httpmethod;
+
+void config_method_http (xmlNodePtr, struct httpd, char *);
+void dlfunc_check       (char *, char *);

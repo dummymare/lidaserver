@@ -1,0 +1,39 @@
+# include "main.h"
+# include "ghost.h"
+
+int thread_pool_init (int cnt)
+{
+   thread_pool.head = malloc (sizeof (struct lida_thread_t));
+   thread_pool.tail = thread_pool.head;
+   thread_pool.head->tmp_flag = 0;
+   
+   if (pthread_create (&(thread_pool.head->pth_id), NULL, thread_trigger, (void *)thread_pool.head))
+      return -1;
+
+   while (--cnt)
+   {
+      thread_pool.head->next = malloc (sizeof (struct lida_thread_t));
+      thread_pool.head->next->prev = thread_pool.head;
+      thread_pool.head = thread_pool.head->next;
+      thread_pool.head->tmp_flag = 0;
+
+      if (pthread_create (&(thread_pool.head->pth_id), NULL, thread_trigger, (void *)thread_pool.head)){
+         lidalog (LIDA_ERR, "pthread_create");
+	 return 0;
+      }
+   }
+}
+
+
+void thread_trigger (void *d)
+{
+   sigset_t sigset;
+
+   
+}
+
+
+void thread_pool_alloc (struct lida_thread_t *d)
+{
+   
+}
